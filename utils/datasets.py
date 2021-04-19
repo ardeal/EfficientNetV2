@@ -581,6 +581,8 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
                 if nL:
                     labels[:, 1] = 1 - labels[:, 1]
 
+        labels = self.ef_annotations(labels)        # Ardeal:
+
         labels_out = torch.zeros((nL, 6))
         if nL:
             labels_out[:, 1:] = torch.from_numpy(labels)
@@ -589,7 +591,20 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
         img = img[:, :, ::-1].transpose(2, 0, 1)  # BGR to RGB, to 3x416x416
         img = np.ascontiguousarray(img)
 
-        return torch.from_numpy(img), labels_out, self.img_files[index], shapes
+        # return torch.from_numpy(img), labels_out, self.img_files[index], shapes
+
+        return {'img': torch.from_numpy(img), 'annot': labels_out}
+
+    def ef_annotations(self, labels):
+        annotation = np.zeros((1, 5))
+        annotation[0, :4] = labels[1:]
+        annotation[0, 4] = labels[:1]
+
+        # transform from [x, y, w, h] to [x1, y1, x2, y2]
+        annotation[:, 2] = annotation[:, 0] + annotation[:, 2]
+        annotation[:, 3] = annotation[:, 1] + annotation[:, 3]
+
+        return annotation
 
     @staticmethod
     def collate_fn(batch):
@@ -597,6 +612,31 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
         for i, l in enumerate(label):
             l[:, 0] = i  # add target image index for build_targets()
         return torch.stack(img, 0), torch.cat(label, 0), path, shapes
+
+    @staticmethod
+    def collater(data):
+        imgs = [s['img'] for s in data]
+        annots = [s['annot'] for s in data]
+        scales = [s['scale'] for s in data]
+
+        imgs = torch.from_numpy(np.stack(imgs, axis=0))
+
+        max_num_annots = max(annot.shape[0] for annot in annots)
+
+        if max_num_annots > 0:
+
+            annot_padded = torch.ones((len(annots), max_num_annots, 5)) * -1
+
+            for idx, annot in enumerate(annots):
+                if annot.shape[0] > 0:
+                    annot_padded[idx, :annot.shape[0], :] = annot
+        else:
+            annot_padded = torch.ones((len(annots), 1, 5)) * -1
+
+        imgs = imgs.permute(0, 3, 1, 2)
+
+        return {'img': imgs, 'annot': annot_padded, 'scale': scales}
+
 
     @staticmethod
     def collate_fn4(batch):

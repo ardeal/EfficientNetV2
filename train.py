@@ -34,69 +34,43 @@ from utils.loss import ComputeLoss
 from utils.plots import plot_images, plot_labels, plot_results, plot_evolution
 from utils.torch_utils import ModelEMA, select_device, intersect_dicts, torch_distributed_zero_first, is_parallel
 from utils.wandb_logging.wandb_utils import WandbLogger, check_wandb_resume
+from network import FocalLoss
 
 
 from network import EfficientNet
 
 logger = logging.getLogger(__name__)
 
+class Params:
+    def __init__(self, project_file):
+        self.params = yaml.safe_load(open(project_file).read())
 
-def train_EfficientNet(train_loader, model, criterion, optimizer, epoch, args):
-    batch_time = AverageMeter('Time', ':6.3f')
-    data_time = AverageMeter('Data', ':6.3f')
-    losses = AverageMeter('Loss', ':.4e')
-    top1 = AverageMeter('Acc@1', ':6.2f')
-    top5 = AverageMeter('Acc@5', ':6.2f')
-    progress = ProgressMeter(len(train_loader), batch_time, data_time, losses, top1,
-                             top5, prefix="Epoch: [{}]".format(epoch))
+    def __getattr__(self, item):
+        return self.params.get(item, None)
 
-    # switch to train mode
+class ModelWithLoss(nn.Module):
+    def __init__(self, model, debug=False):
+        super().__init__()
+        self.criterion = FocalLoss()
+        self.model = model
+        self.debug = debug
 
-    model = EfficientNet.from_pretrained(args.arch, advprop=args.advprop)
-    criterion = nn.CrossEntropyLoss().cuda(args.gpu)
-    optimizer = torch.optim.SGD(model.parameters(), args.lr, momentum=args.momentum, weight_decay=args.weight_decay)
-
-
-    model.train()
-
-    end = time.time()
-    for i, (images, target) in enumerate(train_loader):
-        # measure data loading time
-        data_time.update(time.time() - end)
-
-        if args.gpu is not None:
-            images = images.cuda(args.gpu, non_blocking=True)
-        target = target.cuda(args.gpu, non_blocking=True)
-
-        # compute output
-        output = model(images)
-        loss = criterion(output, target)
-
-        # measure accuracy and record loss
-        acc1, acc5 = accuracy(output, target, topk=(1, 5))
-        losses.update(loss.item(), images.size(0))
-        top1.update(acc1[0], images.size(0))
-        top5.update(acc5[0], images.size(0))
-
-        # compute gradient and do SGD step
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-
-        # measure elapsed time
-        batch_time.update(time.time() - end)
-        end = time.time()
-
-        if i % args.print_freq == 0:
-            progress.print(i)
-
-
+    def forward(self, imgs, annotations, obj_list=None):
+        _, regression, classification, anchors = self.model(imgs)
+        if self.debug:
+            cls_loss, reg_loss = self.criterion(classification, regression, anchors, annotations,
+                                                imgs=imgs, obj_list=obj_list)
+        else:
+            cls_loss, reg_loss = self.criterion(classification, regression, anchors, annotations)
+        return cls_loss, reg_loss
 
 
 def train(hyp, opt, device, tb_writer=None):
     logger.info(colorstr('hyperparameters: ') + ', '.join(f'{k}={v}' for k, v in hyp.items()))
     save_dir, epochs, batch_size, total_batch_size, weights, rank = \
         Path(opt.save_dir), opt.epochs, opt.batch_size, opt.total_batch_size, opt.weights, opt.global_rank
+
+    params = Params(f'projects/{opt.project}.yml')
 
     # Directories
     wdir = save_dir / 'weights'
@@ -397,9 +371,12 @@ def train(hyp, opt, device, tb_writer=None):
 
             # Forward
             with amp.autocast(enabled=cuda):
-                pred = model(imgs)  # forward
-                loss, loss_items = compute_loss(pred, targets.to(device))  # loss scaled by batch_size
-                # criterion
+                # pred = model(imgs)  # forward
+                cls_loss, reg_loss = model(imgs, targets, obj_list=params.obj_list)
+                cls_loss = cls_loss.mean()
+                reg_loss = reg_loss.mean()
+                loss = cls_loss + reg_loss
+                # loss, loss_items = compute_loss(pred, targets.to(device))  # loss scaled by batch_size
                 if rank != -1:
                     loss *= opt.world_size  # gradient averaged between devices in DDP mode
                 if opt.quad:

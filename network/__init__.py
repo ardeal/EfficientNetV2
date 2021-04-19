@@ -1,5 +1,5 @@
-__version__ = "0.7.1"
-from .model import EfficientNet, VALID_MODELS
+__version__ = "0.6.1"
+from .model import EfficientNet
 from .utils import (
     GlobalParams,
     BlockArgs,
@@ -7,3 +7,4 @@ from .utils import (
     efficientnet,
     get_model_params,
 )
+from .loss_ef import FocalLoss
